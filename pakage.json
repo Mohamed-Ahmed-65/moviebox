@@ -1,0 +1,14 @@
+{
+  "name": "stremio-moviebox-streams",
+  "version": "3.0.0",
+  "description": "Stremio addon for MovieBox streaming sources",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "test": "node test_moviebox.js"
+  },
+  "dependencies": {
+    "stremio-addon-sdk": "^1.6.10"
+  }
+}
