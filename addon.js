@@ -252,11 +252,14 @@ const HOST_POOL = [
     "https://api.inprovider.com",
 ];
 
+let globalSharedToken = null;
+let globalSharedTokenExpiry = 0;
+
 class MovieBoxClient {
     constructor() {
         this.hostPool = HOST_POOL;
         this.activeBase = this.hostPool[0];
-        this.runtimeToken = null;
+        this.runtimeToken = globalSharedToken;
         const { userAgent, clientInfo } = generateClientInfoAndUA();
         this.userAgent = userAgent;
         this.clientInfo = clientInfo;
@@ -264,6 +267,10 @@ class MovieBoxClient {
     }
 
     async start() {
+        if (globalSharedToken && Date.now() < globalSharedTokenExpiry) {
+            this.runtimeToken = globalSharedToken;
+            return this;
+        }
         // Initialize by making a warm-up request to get auth token
         try {
             await this._request("GET", "/wefeed-mobile-bff/tab-operating?page=1&tabId=0&version=");
@@ -280,6 +287,8 @@ class MovieBoxClient {
                 const payload = JSON.parse(xUser);
                 if (payload.token) {
                     this.runtimeToken = payload.token;
+                    globalSharedToken = payload.token;
+                    globalSharedTokenExpiry = Date.now() + 30 * 60 * 1000;
                     console.log("[MovieBox] Auth token acquired");
                 }
             } catch {}
@@ -431,6 +440,28 @@ function extractDubbings(title, corner) {
     return [...new Set(tags)];
 }
 
+function normalizeArabic(text) {
+    if (!text) return "";
+    return text
+        .toLowerCase()
+        .replace(/[أإآ]/g, "ا")
+        .replace(/ة/g, "ه")
+        .replace(/ى/g, "ي")
+        .replace(/[گك]/g, "k") // normalize Kaaf/Gaf
+        .replace(/[٠۰]/g, "0")
+        .replace(/[١۱]/g, "1")
+        .replace(/[٢۲]/g, "2")
+        .replace(/[٣۳]/g, "3")
+        .replace(/[٤۴]/g, "4")
+        .replace(/[٥۵]/g, "5")
+        .replace(/[٦۶]/g, "6")
+        .replace(/[٧۷]/g, "7")
+        .replace(/[٨۸]/g, "8")
+        .replace(/[٩۹]/g, "9")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
 function cleanTitle(title) {
     return title.replace(/\[.*?\]|\(.*?\)/g, "").trim();
 }
@@ -449,12 +480,12 @@ async function findMovieBoxMatches(title, year, isMovie, season = 1) {
     
     if (items.length === 0) return [];
 
-    const targetClean = cleanTitle(title).toLowerCase();
+    const targetClean = normalizeArabic(cleanTitle(title));
     const targetSeasonTitle = `${targetClean} s${season}`;
     const matches = [];
 
     for (const item of items) {
-        const itemClean = cleanTitle(item.title || "").toLowerCase();
+        const itemClean = normalizeArabic(cleanTitle(item.title || ""));
         const itemYear = extractYear(item);
 
         console.log(`[MovieBox] Checking: "${item.title}" (${itemYear}) vs "${title}" (${year})`);
@@ -619,8 +650,17 @@ builder.defineStreamHandler(async (args) => {
     const [imdbId, season, episode] = args.id.split(":");
 
     try {
-        // 1. Get metadata from Cinemeta
-        const meta = await getMetaData(args.type, imdbId);
+        const isMovie = args.type === "movie";
+        const seasonNum = season ? parseInt(season) : 1;
+        const episodeNum = episode ? parseInt(episode) : 1;
+
+        // Fetch Cinemeta, Arabic name, and English name ALL IN PARALLEL!
+        const [meta, arName, enName] = await Promise.all([
+            getMetaData(args.type, imdbId),
+            getArabicNameFromTMDB(imdbId, args.type),
+            getEnglishNameFromTMDB(imdbId, args.type)
+        ]);
+
         if (!meta) {
             console.log("[Error] Could not get metadata from Cinemeta");
             return { streams: [] };
@@ -630,14 +670,6 @@ builder.defineStreamHandler(async (args) => {
         const year = meta.year || (meta.releaseInfo ? meta.releaseInfo.split("-")[0] : "");
 
         console.log(`[Meta] Title: "${searchQuery}" | Year: ${year}`);
-
-        const isMovie = args.type === "movie";
-        const seasonNum = season ? parseInt(season) : 1;
-        const episodeNum = episode ? parseInt(episode) : 1;
-
-        // 2. Resolve all name variations (Cinemeta name, TMDB Arabic name, TMDB English name)
-        const arName = await getArabicNameFromTMDB(imdbId, args.type);
-        const enName = await getEnglishNameFromTMDB(imdbId, args.type);
 
         const namesToTry = new Set();
         if (searchQuery) namesToTry.add(searchQuery);
@@ -678,7 +710,7 @@ builder.defineStreamHandler(async (args) => {
             }
         }
 
-        // 3. Extract streams
+        // 3. Extract streams from MovieBox
         let allStreams = [];
         if (finalMatches.length > 0) {
             allStreams = await getMovieBoxStreams(finalMatches, isMovie, seasonNum, episodeNum);
